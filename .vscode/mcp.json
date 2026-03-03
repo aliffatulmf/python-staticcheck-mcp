@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "staticcheck-mcp": {
+      "command": "uv",
+      "args": ["tool", "run", "staticcheck-mcp"],
+      "env": {
+        "STATICCHECK_MCP_BANNER": "false"
+      }
+    }
+  }
+}
