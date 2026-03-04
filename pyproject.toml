@@ -1,19 +1,22 @@
 [project]
-name = "staticcheck-mcp"
-version = "0.1.0"
-description = "FastMCP server for Go staticcheck with stdio and sse transports"
-requires-python = ">=3.11"
-dependencies = ["pydantic>=2.0.0", "fastmcp>=3.0.2"]
+name = "python-staticcheck-mcp"
+version = "0.2.0"
+description = "Automated Go code analysis and error explanation with staticcheck."
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.0.0",
+    "fastmcp>=3.0.2",
+]
 
 [project.scripts]
-staticcheck-mcp = "staticcheck_mcp.server:main"
+python-staticcheck-mcp = "python_staticcheck_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/staticcheck_mcp"]
+packages = ["src/python_staticcheck_mcp"]
 
 [tool.uv]
 package = true
@@ -29,16 +32,8 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501"]
-
-[tool.pyright]
-pythonVersion = "3.11"
-pythonPlatform = "All"
-typeCheckingMode = "standard"
-
-[tool.pylint.'MESSAGES CONTROL']
-disable = ["C0114", "C0115", "C0116"]
