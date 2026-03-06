@@ -17,4 +17,4 @@ class Issue:
 @dataclass(frozen=True)
 class ExecResult:
     done: bool
-    value: any
+    value: str
