@@ -2,7 +2,7 @@
   "servers": {
     "python-staticcheck-mcp": {
       "command": "uv",
-      "args": ["tool", "run", "python-staticcheck-mcp"]
+      "args": ["run", "python-staticcheck-mcp"]
     }
   }
 }
