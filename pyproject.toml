@@ -2,7 +2,7 @@
 name = "python-staticcheck-mcp"
 version = "0.4.0"
 description = "Automated Go code analysis and error explanation with staticcheck."
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",
     "fastmcp>=3.0.2",
@@ -35,7 +35,7 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
