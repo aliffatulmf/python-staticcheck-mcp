@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 from fastmcp import FastMCP
 
 from .types import UNKNOWN_ERROR, ExecResult, Issue
@@ -167,7 +168,7 @@ def _parse_staticcheck_json(raw: str, fallback_path: str) -> list[Issue]:
 
         try:
             message = message_raw.encode("utf-8").decode("unicode_escape")
-        except UnicodeEncodeError, UnicodeDecodeError, UnicodeError:
+        except (UnicodeEncodeError, UnicodeDecodeError, UnicodeError):
             message = message_raw
 
         issues.append(
@@ -351,7 +352,7 @@ async def python_staticcheck_checks(
     if not isinstance(path, str) or not Path(path).is_absolute():
         return {"ok": False, "message": "`path` must be an absolute string path.", "code": None, "path": path}
 
-    if not Path(path).is_file():
+    if not await anyio.Path(path).is_file():
         return {"ok": False, "message": f"File not found: {path}", "code": None, "path": path}
 
     args = _build_checks_cmd(path, checks)
@@ -415,16 +416,22 @@ async def python_staticcheck_package(
         return {"ok": False, "message": "`path` must be a non-empty string.", "code": None, "path": path}
 
     resolved_path = Path(path)
-
     clean_path = str(resolved_path).replace("/...", "").replace("\\...", "").replace("...", "").rstrip("/\\").rstrip()
     final_path = Path(clean_path) if clean_path else resolved_path
 
-    if not final_path.exists():
+    anyio_final_path = anyio.Path(final_path)
+
+    if not await anyio_final_path.exists():
         return {"ok": False, "message": f"Path not found: {path}", "code": None, "path": path}
-    if not final_path.is_dir():
+
+    if not await anyio_final_path.is_dir():
         return {"ok": False, "message": f"Path must be a directory: {path}", "code": None, "path": path}
 
-    go_files = list(final_path.glob("*.go"))
+    go_files = []
+    async for entry in anyio_final_path.iterdir():
+        if await entry.is_file() and entry.name.endswith(".go"):
+            go_files.append(entry)
+
     if not go_files:
         return {"ok": True, "issues": []}
 
