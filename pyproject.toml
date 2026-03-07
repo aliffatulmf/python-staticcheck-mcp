@@ -1,6 +1,6 @@
 [project]
 name = "python-staticcheck-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "Automated Go code analysis and error explanation with staticcheck."
 requires-python = ">=3.11"
 dependencies = [

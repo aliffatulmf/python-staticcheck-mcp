@@ -420,3 +420,238 @@ async def test_python_staticcheck_checks_returns_structured_issues(tmp_path, mon
             }
         ],
     }
+
+
+class ChunkedStream:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = list(chunks)
+
+    async def read(self, chunk_size: int) -> bytes:
+        await asyncio.sleep(0)
+        if not self._chunks:
+            return b""
+
+        chunk = self._chunks.pop(0)
+        if len(chunk) <= chunk_size:
+            return chunk
+
+        self._chunks.insert(0, chunk[chunk_size:])
+        return chunk[:chunk_size]
+
+
+class HangingStream:
+    async def read(self, chunk_size: int) -> bytes:
+        await asyncio.Future()
+
+
+class StreamingFakeProcess:
+    """Fake process that supports deterministic streaming reads for testing."""
+
+    def __init__(
+        self,
+        *,
+        stdout_chunks: list[bytes] | None = None,
+        stderr_chunks: list[bytes] | None = None,
+        returncode: int = 1,
+    ):
+        self._returncode = returncode
+        self.killed = False
+        self.stdout = ChunkedStream(stdout_chunks or [])
+        self.stderr = ChunkedStream(stderr_chunks or [])
+
+    async def wait(self) -> int:
+        await asyncio.sleep(0)
+        return self._returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class HangingStreamingProcess:
+    def __init__(self):
+        self.stdout = HangingStream()
+        self.stderr = HangingStream()
+        self.killed = False
+
+    async def wait(self) -> int:
+        await asyncio.Future()
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class NoStreamingFakeProcess:
+    """Fake process without streaming support (fallback test)"""
+
+    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 1):
+        self._stdout = stdout
+        self._stderr = stderr
+        self._returncode = returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+    async def wait(self) -> int:
+        return self._returncode
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_reads_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that streaming read works correctly for normal processes."""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    test_stdout = [b"line1\n", b"line2\nline3\n"]
+    test_stderr = [b"warning1\n", b"warning2\n"]
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return StreamingFakeProcess(stdout_chunks=test_stdout, stderr_chunks=test_stderr, returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="text")
+
+    assert result.done is True
+    assert result.value == "line1\nline2\nline3"
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_concurrent_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that streaming handles multi-chunk output larger than chunk_size."""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    large_stdout = [b"x" * 5000, b"x" * 5000, b"x" * 10000]
+    large_stderr = [b"y" * 4000, b"y" * 11000]
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return StreamingFakeProcess(stdout_chunks=large_stdout, stderr_chunks=large_stderr, returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="none")
+
+    assert result.done is True
+    assert len(result.value) == 20000
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_fallback_to_communicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test fallback to communicate() for processes without streaming support"""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    test_stdout = b"fallback stdout\n"
+    test_stderr = b"fallback stderr\n"
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return NoStreamingFakeProcess(stdout=test_stdout, stderr=test_stderr)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="text")
+
+    assert result.done is True
+    assert result.value == "fallback stdout"
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_single_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test streaming with data that fits in a single chunk."""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    test_stdout = [b"single chunk output\n"]
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return StreamingFakeProcess(stdout_chunks=test_stdout, returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="text")
+
+    assert result.done is True
+    assert result.value == "single chunk output"
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_empty_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test streaming with empty output."""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return StreamingFakeProcess(stdout_chunks=[], stderr_chunks=[], returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="json")
+
+    assert result.done is True
+    assert result.value == ""
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_large_json_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test streaming with large JSON output across multiple chunks."""
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    json_lines = []
+    for i in range(100):
+        payload = {
+            "severity": "warning",
+            "code": "ST1000",
+            "location": {"file": f"file{i}.go", "line": i, "column": 1},
+            "message": "missing package comment",
+        }
+        json_line = json.dumps(payload) + "\n"
+        json_lines.append(json_line)
+
+    test_output = "".join(json_lines).encode("utf-8")
+    output_chunks = [test_output[:4096], test_output[4096:8192], test_output[8192:]]
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return StreamingFakeProcess(stdout_chunks=output_chunks, returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await server._run_staticcheck("test.go", style="json")
+
+    assert result.done is True
+    assert len(result.value) > 0
+    output_str = result.value if isinstance(result.value, str) else result.value.decode("utf-8")
+    assert '"severity"' in output_str
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_streaming_timeout_kills_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+    proc = HangingStreamingProcess()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return proc
+
+    real_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(awaitable, *args, **kwargs):
+        if hasattr(awaitable, "__class__") and awaitable.__class__.__name__ == "_GatheringFuture":
+            raise TimeoutError()
+        return await real_wait_for(awaitable, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+
+    result = await server._run_staticcheck("test.go", style="json")
+
+    assert result.done is False
+    assert result.value == "staticcheck execution timed out."
+    assert proc.killed is True

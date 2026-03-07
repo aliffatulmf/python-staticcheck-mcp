@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import json
 import shutil
 from collections.abc import Iterable
@@ -104,7 +105,40 @@ def _flatten(*args: object) -> list[str]:
     return flat
 
 
-async def _run_staticcheck(*args: str, style: Literal["text", "json", "none"] = "text") -> ExecResult:
+async def read_stream(stream: asyncio.StreamReader, chunk_size: int, chunks: list[bytes]):
+    while True:
+        chunk = await stream.read(chunk_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+
+
+async def _wait_for_process_exit(proc: asyncio.subprocess.Process) -> None:
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1.0)
+    except (TimeoutError, AttributeError):
+        return
+
+
+async def _cleanup_process(proc: asyncio.subprocess.Process, tasks: list[asyncio.Task[object]]):
+    if hasattr(proc, "kill"):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+    for task in tasks:
+        task.cancel()
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    await _wait_for_process_exit(proc)
+
+
+async def _run_staticcheck(
+    *args: str,
+    style: Literal["text", "json", "none"] = "text",
+    chunk_size: int = 8192,
+) -> ExecResult:
     if not _is_staticcheck_available():
         return ExecResult(done=False, value="staticcheck binary not found in PATH.")
 
@@ -123,23 +157,50 @@ async def _run_staticcheck(*args: str, style: Literal["text", "json", "none"] = 
         stderr=asyncio.subprocess.PIPE,
     )
 
+    tasks = []
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return ExecResult(done=False, value="staticcheck execution timed out.")
+        stdout_stream = getattr(proc, "stdout", None)
+        stderr_stream = getattr(proc, "stderr", None)
 
-    out = codecs.decode(stdout or b"", "utf-8", errors="replace").strip()
-    err = codecs.decode(stderr or b"", "utf-8", errors="replace").strip()
+        if stdout_stream is not None or stderr_stream is not None:
+            stdout_chunks = []
+            stderr_chunks = []
+
+            tasks = [asyncio.create_task(proc.wait())]
+
+            stdout_task = None
+            stderr_task = None
+
+            if stdout_stream is not None:
+                stdout_task = asyncio.create_task(read_stream(stdout_stream, chunk_size, stdout_chunks))
+                tasks.append(stdout_task)
+
+            if stderr_stream is not None:
+                stderr_task = asyncio.create_task(read_stream(stderr_stream, chunk_size, stderr_chunks))
+                tasks.append(stderr_task)
+
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=30.0)
+
+            stdout_bytes = b"".join(stdout_chunks)
+            stderr_bytes = b"".join(stderr_chunks)
+        else:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+    except TimeoutError:
+        await _cleanup_process(proc, tasks)
+        return ExecResult(done=False, value="staticcheck execution timed out.")
+    except Exception as e:
+        await _cleanup_process(proc, tasks)
+        return ExecResult(done=False, value=f"Error reading streams: {e}")
+
+    out = codecs.decode(stdout_bytes, "utf-8", errors="replace").strip()
+    err = codecs.decode(stderr_bytes, "utf-8", errors="replace").strip()
+
     if style == "json" and not out and not err:
         return ExecResult(done=True, value="")
-
     if out:
         return ExecResult(done=True, value=out)
     if err:
         return ExecResult(done=False, value=err)
-
     return ExecResult(done=False, value=UNKNOWN_ERROR)
 
 
@@ -415,20 +476,32 @@ async def python_staticcheck_package(
     if not isinstance(path, str) or not path.strip():
         return {"ok": False, "message": "`path` must be a non-empty string.", "code": None, "path": path}
 
-    resolved_path = Path(path)
-    clean_path = str(resolved_path).replace("/...", "").replace("\\...", "").replace("...", "").rstrip("/\\").rstrip()
-    final_path = Path(clean_path) if clean_path else resolved_path
+    clean_path = (
+        str(await anyio.Path(path).resolve())
+        .replace("/...", "")
+        .replace("\\...", "")
+        .replace("...", "")
+        .rstrip("/\\")
+        .rstrip()
+    )
 
-    anyio_final_path = anyio.Path(final_path)
+    anyio_path = anyio.Path(clean_path)
+    if not anyio_path.is_absolute():
+        return {
+            "ok": False,
+            "message": "`path` must be an absolute string path after resolution.",
+            "code": None,
+            "path": path,
+        }
 
-    if not await anyio_final_path.exists():
+    if not await anyio_path.exists():
         return {"ok": False, "message": f"Path not found: {path}", "code": None, "path": path}
 
-    if not await anyio_final_path.is_dir():
+    if not await anyio_path.is_dir():
         return {"ok": False, "message": f"Path must be a directory: {path}", "code": None, "path": path}
 
     go_files = []
-    async for entry in anyio_final_path.iterdir():
+    async for entry in anyio_path.iterdir():
         if await entry.is_file() and entry.name.endswith(".go"):
             go_files.append(entry)
 
