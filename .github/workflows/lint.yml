@@ -20,7 +20,7 @@ jobs:
       fail-fast: true
       matrix:
         python-version:
-          - "latest"
+          - "3.11"
     permissions:
       contents: read
       checks: write

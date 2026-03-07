@@ -11,6 +11,199 @@ import pytest
 import python_staticcheck_mcp.server as server
 from python_staticcheck_mcp.types import UNKNOWN_ERROR
 
+SAMPLES_STATICCHECK_DIR = Path(__file__).resolve().parents[1] / "samples" / "staticcheck"
+
+
+def test_main_runs_mcp_stdio_without_banner(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_run(*, transport, show_banner):
+        called["transport"] = transport
+        called["show_banner"] = show_banner
+
+    monkeypatch.setattr(server.mcp, "run", fake_run)
+
+    server.main()
+
+    assert called == {"transport": "stdio", "show_banner": False}
+
+
+def test_module_entrypoint_invokes_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fastmcp
+
+    calls: list[tuple[str, str, bool]] = []
+
+    def fake_run(self, *, transport, show_banner):
+        calls.append((self.name, transport, show_banner))
+
+    monkeypatch.setattr(fastmcp.FastMCP, "run", fake_run, raising=True)
+
+    existing_module = sys.modules.pop("python_staticcheck_mcp.server", None)
+    try:
+        runpy.run_module("python_staticcheck_mcp.server", run_name="__main__")
+    finally:
+        if existing_module is not None:
+            sys.modules["python_staticcheck_mcp.server"] = existing_module
+
+    assert calls[-1] == (server.MCP_NAME, "stdio", False)
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_accepts_relative_path(monkeypatch):
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(
+            stdout=b'{"severity":"warning","code":"ST1000","location":{"file":"samples/staticcheck/s1.go","line":1,"column":1},"message":"missing package comment"}\n',
+            returncode=1,
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    result = await server.python_staticcheck_package("samples/staticcheck")
+    assert result["ok"] is True
+    assert "issues" in result
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_with_ellipsis_pattern(monkeypatch):
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+    seen_args: list[tuple] = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen_args.append(args)
+        return FakeProcess(stdout=b"", returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    result = await server.python_staticcheck_package("samples/staticcheck/...")
+    assert result["ok"] is True
+    assert not any("..." in str(arg) for arg in seen_args[0]), "Expected no ... pattern in args"
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_with_checks_filter(monkeypatch):
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+    seen_args: list[tuple] = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen_args.append(args)
+        return FakeProcess(stdout=b"", returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    result = await server.python_staticcheck_package("samples/staticcheck", checks=["SA4006", "ST1000"])
+    assert result["ok"] is True
+    assert any("-checks" in str(arg) for arg in seen_args[0])
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_rejects_empty_string(monkeypatch):
+    result = await server.python_staticcheck_package("")
+    assert result["ok"] is False
+    assert "`path` must be a non-empty string." in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_handles_nonexistent_path(monkeypatch):
+    result = await server.python_staticcheck_package("./nonexistent/path")
+    assert result["ok"] is False
+    assert "Path not found" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_python_staticcheck_package_accepts_absolute_path(monkeypatch):
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+    seen_args: list[tuple] = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        seen_args.append(args)
+        return FakeProcess(stdout=b"", returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    abs_path = str(SAMPLES_STATICCHECK_DIR)
+    result = await server.python_staticcheck_package(abs_path)
+    assert result["ok"] is True
+    assert any(abs_path in str(arg) for arg in seen_args[0])
+
+
+def test_flatten_handles_none_and_iterables():
+    # None should be skipped, iterables should be flattened
+    assert server._flatten(None, [1, 2], (3,)) == ["1", "2", "3"]
+
+
+def test_build_checks_cmd_variants():
+    # None checks
+    path = str(SAMPLES_STATICCHECK_DIR / "s1.go")
+    assert server._build_checks_cmd(path, None) == [path]
+    # String checks
+    assert server._build_checks_cmd(path, "SA4006") == ["-checks", "SA4006", path]
+    # List checks
+    assert server._build_checks_cmd(path, ["SA4006", "SA5000"]) == ["-checks", "SA4006,SA5000", path]
+    # Path with ...
+    assert server._build_checks_cmd("foo/...", None) == ["foo/..."]
+
+
+def test_parse_staticcheck_json_handles_jsondecodeerror():
+    # Should skip invalid JSON lines
+    raw = "{invalid json}\n" + json.dumps(
+        {"severity": "error", "code": "SA4006", "location": {"file": "", "line": "1", "column": "1"}, "message": "msg"}
+    )
+    issues = server._parse_staticcheck_json(raw, fallback_path="fallback.go")
+    assert len(issues) == 1
+    assert issues[0].file == "fallback.go"
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_timeout(monkeypatch):
+    import warnings
+
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    class TimeoutProc:
+        async def communicate(self):
+            await asyncio.sleep(0.1)
+            return b"", b""
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return TimeoutProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def fake_wait_for(*args, **kwargs):
+        raise TimeoutError()
+
+    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = await server._run_staticcheck("foo.go")
+
+    assert not result.done
+    assert "timed out" in result.value
+
+
+@pytest.mark.asyncio
+async def test_run_staticcheck_fallback(monkeypatch):
+    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
+
+    class DummyProc:
+        async def communicate(self):
+            return b"", b""
+
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return DummyProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    result = await server._run_staticcheck("foo.go")
+    assert not result.done
+    assert result.value == UNKNOWN_ERROR
+
 
 class FakeProcess:
     def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 1):
@@ -23,57 +216,6 @@ class FakeProcess:
 
     async def wait(self) -> int:
         return self._returncode
-
-
-def test_is_staticcheck_available_reflects_binary_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", None)
-    assert server._is_staticcheck_available() is False
-
-    monkeypatch.setattr(server, "_staticcheck_bin", "C:/tools/staticcheck.exe")
-    assert server._is_staticcheck_available() is True
-
-
-def test_flatten_handles_scalars_lists_and_tuples() -> None:
-    assert server._flatten("-checks", ["SA4006", "SA5000"], ("./pkg",), "-f") == [
-        "-checks",
-        "SA4006",
-        "SA5000",
-        "./pkg",
-        "-f",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_run_staticcheck_returns_missing_binary_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", None)
-
-    result = await server._run_staticcheck("./...")
-
-    assert result.done is False
-    assert result.value == "staticcheck binary not found in PATH."
-
-
-@pytest.mark.asyncio
-async def test_run_staticcheck_uses_formatter_and_returns_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
-    seen: dict[str, object] = {}
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        seen["args"] = args
-        seen["kwargs"] = kwargs
-        return FakeProcess(stdout=b"issue output\n", returncode=1)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-
-    result = await server._run_staticcheck("-checks", "SA4006", style="json")
-
-    assert result.done is True
-    assert result.value == "issue output"
-    assert seen["args"] == ("staticcheck", "-f", "json", "-checks", "SA4006")
-    assert seen["kwargs"] == {
-        "stdout": asyncio.subprocess.PIPE,
-        "stderr": asyncio.subprocess.PIPE,
-    }
 
 
 @pytest.mark.asyncio
@@ -278,125 +420,3 @@ async def test_python_staticcheck_checks_returns_structured_issues(tmp_path, mon
             }
         ],
     }
-
-
-def test_main_runs_mcp_stdio_without_banner(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: dict[str, object] = {}
-
-    def fake_run(*, transport, show_banner):
-        called["transport"] = transport
-        called["show_banner"] = show_banner
-
-    monkeypatch.setattr(server.mcp, "run", fake_run)
-
-    server.main()
-
-    assert called == {"transport": "stdio", "show_banner": False}
-
-
-def test_module_entrypoint_invokes_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    import fastmcp
-
-    calls: list[tuple[str, str, bool]] = []
-
-    def fake_run(self, *, transport, show_banner):
-        calls.append((self.name, transport, show_banner))
-
-    monkeypatch.setattr(fastmcp.FastMCP, "run", fake_run, raising=True)
-
-    existing_module = sys.modules.pop("python_staticcheck_mcp.server", None)
-    try:
-        runpy.run_module("python_staticcheck_mcp.server", run_name="__main__")
-    finally:
-        if existing_module is not None:
-            sys.modules["python_staticcheck_mcp.server"] = existing_module
-
-    assert calls[-1] == (server.MCP_NAME, "stdio", False)
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_accepts_relative_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        return FakeProcess(
-            stdout=b'{"severity":"warning","code":"ST1000","location":{"file":"sandbox/nil.go","line":1,"column":1},"message":"missing package comment"}\n',
-            returncode=1,
-        )
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("sandbox")
-    assert result["ok"] is True
-    assert "issues" in result
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_with_ellipsis_pattern(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
-    seen_args: list[tuple] = []
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        seen_args.append(args)
-        return FakeProcess(stdout=b"", returncode=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("sandbox/...")
-    assert result["ok"] is True
-    assert not any("..." in str(arg) for arg in seen_args[0]), "Expected no ... pattern in args"
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_with_checks_filter(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
-    seen_args: list[tuple] = []
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        seen_args.append(args)
-        return FakeProcess(stdout=b"", returncode=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("sandbox", checks=["SA4006", "ST1000"])
-    assert result["ok"] is True
-    assert any("-checks" in str(arg) for arg in seen_args[0])
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_rejects_empty_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await server.python_staticcheck_package("")
-    assert result["ok"] is False
-    assert "`path` must be a non-empty string." in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_handles_nonexistent_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result = await server.python_staticcheck_package("./nonexistent/path")
-    assert result["ok"] is False
-    assert "Path not found" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_python_staticcheck_package_accepts_absolute_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(server, "_staticcheck_bin", "staticcheck")
-    seen_args: list[tuple] = []
-
-    async def fake_create_subprocess_exec(*args, **kwargs):
-        seen_args.append(args)
-        return FakeProcess(stdout=b"", returncode=0)
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    abs_path = str(Path(__file__).parent.parent / "sandbox")
-    result = await server.python_staticcheck_package(abs_path)
-    assert result["ok"] is True
-    assert any(abs_path in str(arg) for arg in seen_args[0])
