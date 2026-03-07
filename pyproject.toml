@@ -37,6 +37,10 @@ dev = [
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["SIM", "ASYNC", "I", "N", "B", "E", "F", "W", "FLY", "UP"]
 ignore = ["E501"]
