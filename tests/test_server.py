@@ -59,7 +59,7 @@ async def test_python_staticcheck_package_accepts_relative_path(monkeypatch):
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("samples/staticcheck")
+    result = await server.psc_package_analysis("samples/staticcheck")
     assert result["ok"] is True
     assert "issues" in result
 
@@ -74,7 +74,7 @@ async def test_python_staticcheck_package_with_ellipsis_pattern(monkeypatch):
         return FakeProcess(stdout=b"", returncode=0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("samples/staticcheck/...")
+    result = await server.psc_package_analysis("samples/staticcheck/...")
     assert result["ok"] is True
     assert not any("..." in str(arg) for arg in seen_args[0]), "Expected no ... pattern in args"
 
@@ -89,21 +89,21 @@ async def test_python_staticcheck_package_with_checks_filter(monkeypatch):
         return FakeProcess(stdout=b"", returncode=0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    result = await server.python_staticcheck_package("samples/staticcheck", checks=["SA4006", "ST1000"])
+    result = await server.psc_package_analysis("samples/staticcheck", checks=["SA4006", "ST1000"])
     assert result["ok"] is True
     assert any("-checks" in str(arg) for arg in seen_args[0])
 
 
 @pytest.mark.asyncio
 async def test_python_staticcheck_package_rejects_empty_string(monkeypatch):
-    result = await server.python_staticcheck_package("")
+    result = await server.psc_package_analysis("")
     assert result["ok"] is False
     assert "`path` must be a non-empty string." in result["message"]
 
 
 @pytest.mark.asyncio
 async def test_python_staticcheck_package_handles_nonexistent_path(monkeypatch):
-    result = await server.python_staticcheck_package("./nonexistent/path")
+    result = await server.psc_package_analysis("./nonexistent/path")
     assert result["ok"] is False
     assert "Path not found" in result["message"]
 
@@ -119,7 +119,7 @@ async def test_python_staticcheck_package_accepts_absolute_path(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     abs_path = str(SAMPLES_STATICCHECK_DIR)
-    result = await server.python_staticcheck_package(abs_path)
+    result = await server.psc_package_analysis(abs_path)
     assert result["ok"] is True
     assert any(abs_path in str(arg) for arg in seen_args[0])
 
@@ -320,7 +320,7 @@ def test_build_checks_cmd_supports_none_string_and_list(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_python_staticcheck_explain_validates_input_type() -> None:
-    response = await server.python_staticcheck_explain(123)
+    response = await server.psc_explain(123)
 
     assert response == {
         "ok": False,
@@ -338,7 +338,7 @@ async def test_python_staticcheck_explain_handles_runner_failure(monkeypatch: py
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
-    response = await server.python_staticcheck_explain("SA4006")
+    response = await server.psc_explain("SA4006")
 
     assert response["ok"] is False
     assert response["code"] == "SA4006"
@@ -353,14 +353,14 @@ async def test_python_staticcheck_explain_returns_explanation(monkeypatch: pytes
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
-    response = await server.python_staticcheck_explain("SA4006")
+    response = await server.psc_explain("SA4006")
 
     assert response == "explanation text"
 
 
 @pytest.mark.asyncio
 async def test_python_staticcheck_checks_rejects_non_absolute_paths() -> None:
-    response = await server.python_staticcheck_checks("sandbox/sa6.go")
+    response = await server.psc_analysis("sandbox/sa6.go")
 
     assert response == {
         "ok": False,
@@ -381,7 +381,7 @@ async def test_python_staticcheck_checks_normalizes_runner_errors(tmp_path, monk
         return server.ExecResult(done=False, value=r"C:\\\\repo\\\\windows.go: bad thing")
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
-    response = await server.python_staticcheck_checks(str(target), checks=["SA4006", "SA5000"])
+    response = await server.psc_analysis(str(target), checks=["SA4006", "SA5000"])
     assert response == {"ok": False, "error": r"C:/repo/windows.go: bad thing"}
 
 
@@ -405,7 +405,7 @@ async def test_python_staticcheck_checks_returns_structured_issues(tmp_path, mon
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
-    response = await server.python_staticcheck_checks(str(target))
+    response = await server.psc_analysis(str(target))
 
     assert response == {
         "ok": True,

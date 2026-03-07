@@ -262,7 +262,7 @@ def _build_checks_cmd(path: str, checks: str | list[str] | None) -> list[str]:
 
 
 @mcp.tool
-async def python_staticcheck_explain(code: str) -> str | dict[str, Any]:
+async def psc_explain(code: str) -> str | dict[str, Any]:
     """
     Return the official staticcheck explanation for a specific check code.
 
@@ -327,7 +327,7 @@ async def python_staticcheck_explain(code: str) -> str | dict[str, Any]:
 
 
 @mcp.tool
-async def python_staticcheck_checks(
+async def psc_analysis(
     path: str,
     checks: str | list[str] | None = None,
 ) -> dict[str, Any]:
@@ -430,7 +430,7 @@ async def python_staticcheck_checks(
 
 
 @mcp.tool
-async def python_staticcheck_package(
+async def psc_package_analysis(
     path: str,
     checks: str | list[str] | None = None,
 ) -> dict[str, Any]:
