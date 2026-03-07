@@ -1,6 +1,8 @@
 .venv/
-.idea/
 .*_cache/
 __pycache__/
 
-sandbox/
+htmlcov/
+.coverage
+.coverage.*
+.cache
