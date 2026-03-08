@@ -12,7 +12,7 @@ from typing import Any, Literal
 import anyio
 from fastmcp import FastMCP
 
-from .types import UNKNOWN_ERROR, ExecResult, Issue
+from .types import UNKNOWN_ERROR, AnalysisResult, Value, ExplainResult, Issue
 
 MCP_NAME = "python-staticcheck-mcp"
 
@@ -138,9 +138,9 @@ async def _run_staticcheck(
     *args: str,
     style: Literal["text", "json", "none"] = "text",
     chunk_size: int = 8192,
-) -> ExecResult:
+) -> Value:
     if not _is_staticcheck_available():
-        return ExecResult(done=False, value="staticcheck binary not found in PATH.")
+        return Value(done=False, value="staticcheck binary not found in PATH.")
 
     flat_args = _flatten(*args)
 
@@ -187,21 +187,21 @@ async def _run_staticcheck(
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=30.0)
     except TimeoutError:
         await _cleanup_process(proc, tasks)
-        return ExecResult(done=False, value="staticcheck execution timed out.")
+        return Value(done=False, value="staticcheck execution timed out.")
     except Exception as e:
         await _cleanup_process(proc, tasks)
-        return ExecResult(done=False, value=f"Error reading streams: {e}")
+        return Value(done=False, value=f"Error reading streams: {e}")
 
     out = codecs.decode(stdout_bytes, "utf-8", errors="replace").strip()
     err = codecs.decode(stderr_bytes, "utf-8", errors="replace").strip()
 
     if style == "json" and not out and not err:
-        return ExecResult(done=True, value="")
+        return Value(done=True, value="")
     if out:
-        return ExecResult(done=True, value=out)
+        return Value(done=True, value=out)
     if err:
-        return ExecResult(done=False, value=err)
-    return ExecResult(done=False, value=UNKNOWN_ERROR)
+        return Value(done=False, value=err)
+    return Value(done=False, value=UNKNOWN_ERROR)
 
 
 def _parse_staticcheck_json(raw: str, fallback_path: str) -> list[Issue]:
@@ -262,7 +262,7 @@ def _build_checks_cmd(path: str, checks: str | list[str] | None) -> list[str]:
 
 
 @mcp.tool
-async def psc_explain(code: str) -> str | dict[str, Any]:
+async def psc_explain(code: str):
     """
     Return the official staticcheck explanation for a specific check code.
 
@@ -318,11 +318,11 @@ async def psc_explain(code: str) -> str | dict[str, Any]:
     - Requires `staticcheck` binary to be installed and available in PATH.
     """
     if not isinstance(code, str):
-        return {"ok": False, "message": "`code` must be a string.", "code": None}
+        return ExplainResult(ok=False, message="`code` must be a string.", code=None).model_dump()
     result = await _run_staticcheck("-explain", code, style="none")
     result_value = codecs.decode(str(result.value), "unicode_escape", errors="replace").strip()
     if not result.done:
-        return {"ok": False, "message": result_value, "code": code}
+        return ExplainResult(ok=False, message=result_value, code=code).model_dump()
     return result_value
 
 
@@ -330,7 +330,7 @@ async def psc_explain(code: str) -> str | dict[str, Any]:
 async def psc_analysis(
     path: str,
     checks: str | list[str] | None = None,
-) -> dict[str, Any]:
+):
     """
     Run staticcheck on a specified Go file or directory and return structured findings.
 
@@ -411,10 +411,20 @@ async def psc_analysis(
     - Path validation: path must be absolute and exist (file or directory).
     """
     if not isinstance(path, str) or not Path(path).is_absolute():
-        return {"ok": False, "message": "`path` must be an absolute string path.", "code": None, "path": path}
+        return AnalysisResult(
+            ok=False,
+            message="`path` must be an absolute string path.",
+            code=None,
+            path=path,
+        ).model_dump()
 
     if not await anyio.Path(path).is_file():
-        return {"ok": False, "message": f"File not found: {path}", "code": None, "path": path}
+        return AnalysisResult(
+            ok=False,
+            message=f"File not found: {path}",
+            code=None,
+            path=path,
+        ).model_dump()
 
     args = _build_checks_cmd(path, checks)
     result = await _run_staticcheck(*args, style="json")
@@ -423,17 +433,20 @@ async def psc_analysis(
         res_val = result.value
         if isinstance(result.value, str):
             res_val = result.value.replace(r"\\\\", "/")
-        return {"ok": False, "error": res_val or UNKNOWN_ERROR}
+        return AnalysisResult(
+            ok=False,
+            error=res_val or UNKNOWN_ERROR,
+        ).model_dump()
 
     issues = _parse_staticcheck_json(result.value, fallback_path=path)
-    return {"ok": True, "issues": [issue.__dict__ for issue in issues]}
+    return AnalysisResult(ok=True, issues=issues).model_dump()
 
 
 @mcp.tool
 async def psc_package_analysis(
     path: str,
     checks: str | list[str] | None = None,
-) -> dict[str, Any]:
+):
     """
     Run staticcheck on all Go files in a package or directory (non-recursive).
 
@@ -474,7 +487,7 @@ async def psc_package_analysis(
     - Subdirectories are ignored (e.g., "a/d/e.go" will NOT be checked for path "a").
     """
     if not isinstance(path, str) or not path.strip():
-        return {"ok": False, "message": "`path` must be a non-empty string.", "code": None, "path": path}
+        return AnalysisResult(ok=False, message="`path` must be a non-empty string.", code=None, path=path).model_dump()
 
     clean_path = (
         str(await anyio.Path(path).resolve())
@@ -487,18 +500,18 @@ async def psc_package_analysis(
 
     anyio_path = anyio.Path(clean_path)
     if not anyio_path.is_absolute():
-        return {
-            "ok": False,
-            "message": "`path` must be an absolute string path after resolution.",
-            "code": None,
-            "path": path,
-        }
+        return AnalysisResult(
+            ok=False,
+            message="`path` must be an absolute string path after resolution.",
+            code=None,
+            path=path,
+        ).model_dump()
 
     if not await anyio_path.exists():
-        return {"ok": False, "message": f"Path not found: {path}", "code": None, "path": path}
+        return AnalysisResult(ok=False, message=f"Path not found: {path}", code=None, path=path).model_dump()
 
     if not await anyio_path.is_dir():
-        return {"ok": False, "message": f"Path must be a directory: {path}", "code": None, "path": path}
+        return AnalysisResult(ok=False, message=f"Path must be a directory: {path}", code=None, path=path).model_dump()
 
     go_files = []
     async for entry in anyio_path.iterdir():
@@ -506,7 +519,7 @@ async def psc_package_analysis(
             go_files.append(entry)
 
     if not go_files:
-        return {"ok": True, "issues": []}
+        return AnalysisResult(ok=True, issues=[]).model_dump()
 
     all_issues: list[Issue] = []
     for go_file in go_files:
@@ -517,7 +530,7 @@ async def psc_package_analysis(
             issues = _parse_staticcheck_json(result.value, fallback_path=file_path)
             all_issues.extend(issues)
 
-    return {"ok": True, "issues": [issue.__dict__ for issue in all_issues]}
+    return AnalysisResult(ok=True, issues=all_issues).model_dump()
 
 
 def main():

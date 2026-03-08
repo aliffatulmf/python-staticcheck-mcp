@@ -334,7 +334,7 @@ async def test_python_staticcheck_explain_handles_runner_failure(monkeypatch: py
     async def fake_run(*args, **kwargs):
         assert args == ("-explain", "SA4006")
         assert kwargs == {"style": "none"}
-        return server.ExecResult(done=False, value="staticcheck is unhappy")
+        return server.Value(done=False, value="staticcheck is unhappy")
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
@@ -349,7 +349,7 @@ async def test_python_staticcheck_explain_handles_runner_failure(monkeypatch: py
 @pytest.mark.asyncio
 async def test_python_staticcheck_explain_returns_explanation(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run(*args, **kwargs):
-        return server.ExecResult(done=True, value=" explanation text \n")
+        return server.Value(done=True, value=" explanation text \n")
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
@@ -378,7 +378,7 @@ async def test_python_staticcheck_checks_normalizes_runner_errors(tmp_path, monk
     async def fake_run(*args, **kwargs):
         assert args == ("-checks", "SA4006,SA5000", str(target.resolve()))
         assert kwargs == {"style": "json"}
-        return server.ExecResult(done=False, value=r"C:\\\\repo\\\\windows.go: bad thing")
+        return server.Value(done=False, value=r"C:\\\\repo\\\\windows.go: bad thing")
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
     response = await server.psc_analysis(str(target), checks=["SA4006", "SA5000"])
@@ -401,7 +401,7 @@ async def test_python_staticcheck_checks_returns_structured_issues(tmp_path, mon
     async def fake_run(*args, **kwargs):
         assert args == (str(target.resolve()),)
         assert kwargs == {"style": "json"}
-        return server.ExecResult(done=True, value=raw)
+        return server.Value(done=True, value=raw)
 
     monkeypatch.setattr(server, "_run_staticcheck", fake_run)
 
