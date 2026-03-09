@@ -7,12 +7,12 @@ import json
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import anyio
 from fastmcp import FastMCP
 
-from .types import UNKNOWN_ERROR, AnalysisResult, Value, ExplainResult, Issue
+from python_staticcheck_mcp.types import UNKNOWN_ERROR, AnalysisResult, ExplainResult, Issue, Value
 
 MCP_NAME = "python-staticcheck-mcp"
 
